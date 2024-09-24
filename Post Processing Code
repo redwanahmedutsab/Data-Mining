@@ -1,0 +1,150 @@
+Code for frame extraction:
+
+from google.colab import drive
+import cv2
+import os
+
+drive.mount('/content/drive')
+
+video_path = '/content/drive/My Drive/fingertip_video.MOV'
+output_dir = '/content/drive/My Drive/output_frames'
+
+def extract_frames(video_path, output_dir, frame_rate=30):
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    cap = cv2.VideoCapture(video_path)
+    frame_count = 0
+    if not cap.isOpened():
+        print("Error: Unable to open video file.")
+        return
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            print("Video extraction completed.")
+            break
+        frame_count += 1
+        if frame_count % frame_rate == 0:
+            frame_name = os.path.join(output_dir, f"frame_{frame_count}.jpg")
+            cv2.imwrite(frame_name, frame)
+            print(f"Extracted {frame_name}")
+    cap.release()
+    print("All frames extracted.")
+
+extract_frames(video_path, output_dir)
+
+
+Code to resize the frames into 224*224 (for res-18) (resoultion is for pre trained model):
+
+import numpy as np
+from PIL import Image
+import os
+
+# Function to preprocess the extracted frames
+def preprocess_frames(frame_dir, frame_size=(224, 224)):
+    frames = []
+    for frame_file in sorted(os.listdir(frame_dir)):  # Sort to maintain frame order
+        frame_path = os.path.join(frame_dir, frame_file)
+        img = Image.open(frame_path)  # Open the image
+        img = img.resize(frame_size)  # Resize to 224x224 (for ResNet-18)
+        img = np.array(img)  # Convert image to NumPy array (RGB format)
+        frames.append(img)
+
+    # Stack frames along a new axis (time axis)
+    stacked_frames = np.stack(frames, axis=0)  # Stack along time axis (shape: [num_frames, 224, 224, 3])
+    stacked_frames = stacked_frames / 255.0  # Normalize pixel values to [0, 1]
+    stacked_frames = np.expand_dims(stacked_frames, axis=0)  # Add batch dimension (shape: [1, num_frames, 224, 224, 3])
+    return stacked_frames
+
+# Example usage to preprocess frames
+frame_dir = '/content/drive/My Drive/output_frames'  # Directory where frames are saved
+stacked_input = preprocess_frames(frame_dir)
+
+# Print the shape of the stacked input to verify
+print(f"Stacked input shape: {stacked_input.shape}")
+
+Generating PPG Signals:
+
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+from PIL import Image
+
+def extract_ppg_signal(frame_dir):
+    ppg_signal = []
+
+    for frame_file in sorted(os.listdir(frame_dir)):
+        if frame_file.endswith(('.png', '.jpg', '.jpeg')):
+            frame_path = os.path.join(frame_dir, frame_file)
+            img = Image.open(frame_path).convert('RGB')
+            img_np = np.array(img)
+
+            red_channel = img_np[:, :, 0]
+            avg_red_intensity = np.mean(red_channel)
+            ppg_signal.append(avg_red_intensity)
+
+    return np.array(ppg_signal)
+
+frame_dir = '/content/drive/My Drive/output_frames'
+ppg_signal = extract_ppg_signal(frame_dir)
+
+plt.figure(figsize=(12, 6))
+plt.plot(ppg_signal, label='PPG Signal', color='r')
+plt.title('Extracted PPG Signal from RGB Frames')
+plt.xlabel('Frame Number')
+plt.ylabel('Average Red Channel Intensity')
+plt.legend()
+plt.grid()
+plt.show()
+
+Pre Process Signals:
+from scipy.signal import butter, filtfilt
+
+# Function to create a Butterworth low-pass filter
+def butter_lowpass(cutoff, fs, order=5):
+    nyquist = 0.5 * fs
+    normal_cutoff = cutoff / nyquist
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    return b, a
+
+# Function to apply low-pass filter
+def lowpass_filter(data, cutoff, fs, order=5):
+    b, a = butter_lowpass(cutoff, fs, order=order)
+    y = filtfilt(b, a, data)
+    return y
+
+# Parameters for filtering
+cutoff_freq = 3.0  # Desired cutoff frequency of the filter (Hz)
+sampling_rate = 30  # Sampling rate (frames per second)
+
+# Apply low-pass filter to the PPG signal
+filtered_ppg_signal = lowpass_filter(ppg_signal, cutoff_freq, sampling_rate)
+
+Feature Extraction:
+def extract_features(ppg_signal):
+    features = {
+        'mean': np.mean(ppg_signal),
+        'std': np.std(ppg_signal),
+        'max': np.max(ppg_signal),
+        'min': np.min(ppg_signal),  # Corrected line
+        'peak_to_peak': np.ptp(ppg_signal)  # Peak-to-peak amplitude
+    }
+    return features
+
+# Extract features from the filtered PPG signal
+features = extract_features(filtered_ppg_signal)
+
+
+Prediction:
+import joblib
+
+model = joblib.load('/content/drive/My Drive/hemoglobin_model.pkl')
+
+feature_tensor = np.array(list(features.values())).reshape(1, -1)
+
+predicted_hemoglobin = model.predict(feature_tensor)
+
+predicted_hemoglobin = max(min(predicted_hemoglobin[0], 20), 0)
+
+print(f"Predicted Hemoglobin Level: {predicted_hemoglobin:.2f} gm/dL")
